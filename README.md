@@ -1,20 +1,46 @@
 # Reaper
 
-Orphan process hunter for Claude Code. Finds and terminates stale Claude Code processes that remain running after sessions end.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+> Orphan process hunter for Claude Code. Finds and terminates stale processes that remain running after sessions end, freeing up RAM.
 
 ## Installation
 
 ```bash
-cd reaper
-uv sync
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/daviguides/reaper/main/install.sh)"
 ```
+
+### Manual Installation
+
+```bash
+git clone https://github.com/daviguides/reaper.git ~/.local/share/reaper
+uv tool install -e ~/.local/share/reaper
+```
+
+The installer also sets up a cron job to run `reaper hunt -y` every 15 minutes automatically.
+
+### Updating
+
+Re-run the installer — it pulls latest changes and updates the cron job:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/daviguides/reaper/main/install.sh)"
+```
+
+Or manually:
+
+```bash
+cd ~/.local/share/reaper && git pull
+```
+
+Since the install is editable, pulling new changes is all you need.
 
 ## Usage
 
 ### List processes
 
 ```bash
-uv run reaper list
+reaper list
 ```
 
 Shows all Claude Code processes with status:
@@ -25,7 +51,7 @@ Shows all Claude Code processes with status:
 ### Hunt orphans
 
 ```bash
-uv run reaper hunt
+reaper hunt
 ```
 
 Terminates orphan processes (those with no terminal attached).
@@ -39,23 +65,42 @@ Options:
 
 ```bash
 # List all Claude processes
-uv run reaper list
+reaper list
 
 # Kill orphans with confirmation
-uv run reaper hunt
+reaper hunt
 
 # Kill orphans without confirmation
-uv run reaper hunt -y
+reaper hunt -y
 
 # Force kill all stale processes
-uv run reaper hunt --all --force --yes
+reaper hunt --all --force --yes
+```
+
+## Output
+
+```
+                    Claude Code Processes
+┏━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━┓
+┃   PID ┃ Terminal ┃ Started ┃ CPU Time ┃   Memory ┃ Status ┃
+┡━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━┩
+│ 53203 │ s001     │ 11:43   │ 1:27.05  │ 454.3 MB │ active │
+│ 61140 │ ??       │ 11:55   │ 0:00.02  │   1.3 MB │ orphan │
+└───────┴──────────┴─────────┴──────────┴──────────┴────────┘
+
+Found 1 orphan process(es) consuming 1.3 MB
 ```
 
 ## Development
 
 ```bash
+cd reaper
 uv sync
-uv run pytest
-uv run ruff check src tests
-uv run mypy src
+make test    # Run tests
+make check   # Lint + types
+make format  # Format code
 ```
+
+## License
+
+MIT License
