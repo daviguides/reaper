@@ -1,14 +1,165 @@
+# ─── Python ───────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
-.venv/
 *.egg-info/
+*.egg
 dist/
 build/
-.eggs/
-.mypy_cache/
+wheels/
+*.whl
+sdist/
+.venv/
+venv/
+env/
+.env
+.env.*
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+develop-eggs/
+eggs/
+lib/
+lib64/
+parts/
+var/
+*.manifest
+*.spec
+.installed.cfg
+
+# ─── Testing & Coverage ──────────────────────────────────────────────
+.hypothesis/
 .pytest_cache/
-.ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
+*.cover
+.tox/
+.nox/
+nosetests.xml
+pytest-results/
+
+# ─── Linting & Type Checking ─────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+.pyre/
+
+# ─── Rust ─────────────────────────────────────────────────────────────
+target/
+Cargo.lock
+**/*.rs.bk
+
+# ─── Node / Frontend ─────────────────────────────────────────────────
+node_modules/
+.npm
+.yarn/
+.pnp.*
+bower_components/
+jspm_packages/
+web_modules/
+*.tsbuildinfo
+.next/
+.nuxt/
+.output/
+.cache/
+.parcel-cache/
+.turbo/
+.vercel/
+.svelte-kit/
+out/
+storybook-static/
+.astro/
+
+# ─── Bundler Output ──────────────────────────────────────────────────
+dist/
+build/
+*.min.js
+*.min.css
+*.bundle.js
+*.chunk.js
+
+# ─── macOS ────────────────────────────────────────────────────────────
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+
+# ─── Linux ────────────────────────────────────────────────────────────
+*~
+.fuse_hidden*
+.nfs*
+
+# ─── Windows ──────────────────────────────────────────────────────────
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ─── IDEs & Editors ──────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.settings/
+*.code-workspace
+
+# ─── Docker ───────────────────────────────────────────────────────────
+docker-compose.override.yml
+
+# ─── Databases ────────────────────────────────────────────────────────
+*.sqlite3
+*.db
+*.db-journal
+
+# ─── Logs ─────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ─── Secrets & Credentials ───────────────────────────────────────────
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+*.p12
+credentials.json
+service-account.json
+
+# ─── Terraform / IaC ─────────────────────────────────────────────────
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ─── Misc ─────────────────────────────────────────────────────────────
+.worktrees/
+*.bak
+*.tmp
+*.temp
+*.orig
+*.patch
