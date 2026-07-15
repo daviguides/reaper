@@ -1,11 +1,40 @@
 """Tests for core functionality."""
 
-from reaper.core import identify_orphan_processes, identify_stale_processes
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from reaper.core import (
+    discover_marshal_protected_pids,
+    identify_orphan_processes,
+    identify_stale_processes,
+    is_pid_alive,
+    process_ancestor_pids,
+)
 from reaper.models import (
     ProcessInfo,
     calculate_total_memory,
     format_memory_size,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_protected_pids():
+    """Isolate every test from this machine's real ~/work/projects.
+
+    `identify_orphan_processes`/`identify_stale_processes` default
+    to `discover_marshal_protected_pids()` when `protected_pids`
+    isn't passed — without this, existing tests calling them bare
+    would depend on whatever's actually running on the machine.
+    Tests exercising the new marshal-awareness pass `protected_pids`
+    explicitly, overriding this.
+    """
+    with patch(
+        "reaper.core.discover_marshal_protected_pids",
+        return_value=set(),
+    ):
+        yield
 
 
 def _create_process(
@@ -163,3 +192,178 @@ class TestMemoryFunctions:
         total = calculate_total_memory(processes=[])
 
         assert total == 0
+
+
+class TestIsPidAlive:
+    """Tests for is_pid_alive."""
+
+    def test_current_process_is_alive(self) -> None:
+        import os
+
+        assert is_pid_alive(os.getpid()) is True
+
+    def test_dead_pid_is_not_alive(self) -> None:
+        import subprocess
+
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        # Give the OS a moment to reap; PID is now free/unassigned
+        # to a live process either way.
+        assert is_pid_alive(proc.pid) is False
+
+    def test_permission_error_still_counts_as_alive(self) -> None:
+        with patch(
+            "reaper.core.os.kill",
+            side_effect=PermissionError,
+        ):
+            assert is_pid_alive(1) is True
+
+
+class TestDiscoverMarshalProtectedPids:
+    """Tests for discover_marshal_protected_pids."""
+
+    def test_no_projects_root_returns_empty(self, tmp_path: Path) -> None:
+        missing = tmp_path / "does-not-exist"
+        assert discover_marshal_protected_pids(missing) == set()
+
+    def test_live_pid_marker_is_protected(self, tmp_path: Path) -> None:
+        import os
+
+        marker_dir = (
+            tmp_path / "owner" / "repo" / "project" / ".active-sessions"
+        )
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "my-task.yaml").write_text(
+            f"task: my-task\nmilestone: ''\npid: {os.getpid()}\n"
+            "mode: \"\"\nsession_file: sessions/x.jsonl\n"
+            "started: '2026-07-15T00:00:00Z'\n",
+        )
+
+        result = discover_marshal_protected_pids(tmp_path)
+
+        assert result == {os.getpid()}
+
+    def test_dead_pid_marker_is_not_protected(self, tmp_path: Path) -> None:
+        import subprocess
+
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+
+        marker_dir = (
+            tmp_path / "owner" / "repo" / "project" / ".active-sessions"
+        )
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "my-task.yaml").write_text(
+            f"task: my-task\npid: {proc.pid}\n",
+        )
+
+        result = discover_marshal_protected_pids(tmp_path)
+
+        assert result == set()
+
+    def test_malformed_marker_ignored(self, tmp_path: Path) -> None:
+        marker_dir = (
+            tmp_path / "owner" / "repo" / "project" / ".active-sessions"
+        )
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "broken.yaml").write_text("not a pid line at all\n")
+
+        assert discover_marshal_protected_pids(tmp_path) == set()
+
+
+class TestProcessAncestorPids:
+    """Tests for process_ancestor_pids."""
+
+    def test_walks_up_chain_until_init(self) -> None:
+        # 500 -> 400 -> 300 -> init(1)
+        responses = iter(["400", "300", "1"])
+
+        def _fake_run(cmd, **kwargs):
+            result = MagicMock()
+            result.stdout = next(responses)
+            return result
+
+        with patch(
+            "reaper.core.subprocess.run",
+            side_effect=_fake_run,
+        ):
+            chain = process_ancestor_pids(500)
+
+        assert chain == [500, 400, 300]
+
+    def test_stops_on_empty_ppid(self) -> None:
+        result = MagicMock()
+        result.stdout = ""
+        with patch("reaper.core.subprocess.run", return_value=result):
+            chain = process_ancestor_pids(999)
+        assert chain == [999]
+
+    def test_stops_on_lookup_failure(self) -> None:
+        import subprocess
+
+        with patch(
+            "reaper.core.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "ps"),
+        ):
+            chain = process_ancestor_pids(999)
+        assert chain == [999]
+
+
+class TestOrphanDetectionRespectsMarshal:
+    """Marshal-supervised processes must never be treated as orphan/stale,
+    even though they legitimately have no TTY."""
+
+    def test_protected_ancestor_excludes_from_orphans(self) -> None:
+        processes = [
+            _create_process(pid=100, is_current=True),
+            _create_process(pid=200, is_orphan=True),  # marshal-supervised
+            _create_process(pid=300, is_orphan=True),  # genuine orphan
+        ]
+
+        def _fake_ancestors(pid, max_depth=32):
+            if pid == 200:
+                return [200, 250, 999]  # 999 = protected foreman PID
+            return [pid]
+
+        with patch(
+            "reaper.core.process_ancestor_pids",
+            side_effect=_fake_ancestors,
+        ):
+            result = identify_orphan_processes(
+                processes=processes,
+                protected_pids={999},
+            )
+
+        assert [p.pid for p in result] == [300]
+
+    def test_no_protected_pids_keeps_prior_behavior(self) -> None:
+        processes = [
+            _create_process(pid=200, is_orphan=True),
+        ]
+        result = identify_orphan_processes(
+            processes=processes,
+            protected_pids=set(),
+        )
+        assert [p.pid for p in result] == [200]
+
+    def test_stale_processes_also_respect_protection(self) -> None:
+        processes = [
+            _create_process(pid=200, is_orphan=True),
+            _create_process(pid=300, is_orphan=False),
+        ]
+
+        def _fake_ancestors(pid, max_depth=32):
+            if pid == 200:
+                return [200, 999]
+            return [pid]
+
+        with patch(
+            "reaper.core.process_ancestor_pids",
+            side_effect=_fake_ancestors,
+        ):
+            result = identify_stale_processes(
+                processes=processes,
+                protected_pids={999},
+            )
+
+        assert [p.pid for p in result] == [300]
