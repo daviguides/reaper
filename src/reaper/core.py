@@ -123,14 +123,14 @@ def is_pid_alive(pid: int) -> bool:
     return True
 
 
-def discover_marshal_protected_pids(
+def discover_session_protected_pids(
     projects_root: Path | None = None,
 ) -> set[int]:
-    """PIDs of `foreman` processes actively supervised by marshal.
+    """PIDs of `foreman` processes with a live session marker.
 
-    Reads marshal's `.active-sessions/<task>.yaml` markers directly
+    Reads foreman's `.active-sessions/<task>.yaml` markers directly
     from disk, across every project directory — reaper has no
-    dependency on marshal/foreman's own packages (separate repos,
+    dependency on the orchestration packages (separate repos,
     read the on-disk contract instead). Each marker is written by
     `foreman.core.events.EventEmitter` at session start (`pid:
     {os.getpid()}`, the foreman process's own PID) and removed at
@@ -173,8 +173,8 @@ def process_ancestor_pids(
 ) -> list[int]:
     """The PID plus every ancestor up the process tree.
 
-    marshal-supervised `claude` processes are grandchildren of the
-    `foreman` process the active-session marker records (marshal →
+    scheduler-dispatched `claude` processes are grandchildren of the
+    `foreman` process the active-session marker records (queue →
     foreman → claude SDK → claude CLI) — checking the PID alone
     against the protected set would never match; the ancestor
     chain is what needs checking.
@@ -222,17 +222,17 @@ def identify_orphan_processes(
     Args:
         processes: List of all Claude processes.
         protected_pids: Live foreman PIDs to never treat as
-            orphaned, regardless of TTY — a marshal-dispatched
+            orphaned, regardless of TTY — a queue-dispatched
             `claude` process legitimately has none. Defaults to
-            `discover_marshal_protected_pids()`; pass an explicit
+            `discover_session_protected_pids()`; pass an explicit
             empty set to disable protection entirely.
 
     Returns:
         List of orphan processes (excluding current session and
-        anything marshal-supervised).
+        anything the scheduler supervises).
     """
     if protected_pids is None:
-        protected_pids = discover_marshal_protected_pids()
+        protected_pids = discover_session_protected_pids()
 
     candidates = [
         p for p in processes
@@ -261,7 +261,7 @@ def identify_stale_processes(
         exclude_current: Whether to exclude current session.
         protected_pids: Live foreman PIDs to never treat as stale —
             see `identify_orphan_processes`. Defaults to
-            `discover_marshal_protected_pids()`.
+            `discover_session_protected_pids()`.
 
     Returns:
         List of stale processes.
@@ -273,7 +273,7 @@ def identify_stale_processes(
     )
 
     if protected_pids is None:
-        protected_pids = discover_marshal_protected_pids()
+        protected_pids = discover_session_protected_pids()
     if not protected_pids:
         return candidates
 

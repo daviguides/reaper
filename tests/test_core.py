@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from reaper.core import (
-    discover_marshal_protected_pids,
+    discover_session_protected_pids,
     identify_orphan_processes,
     identify_stale_processes,
     is_pid_alive,
@@ -24,14 +24,14 @@ def _no_real_protected_pids():
     """Isolate every test from this machine's real ~/work/projects.
 
     `identify_orphan_processes`/`identify_stale_processes` default
-    to `discover_marshal_protected_pids()` when `protected_pids`
+    to `discover_session_protected_pids()` when `protected_pids`
     isn't passed — without this, existing tests calling them bare
     would depend on whatever's actually running on the machine.
-    Tests exercising the new marshal-awareness pass `protected_pids`
+    Tests exercising the session-awareness pass `protected_pids`
     explicitly, overriding this.
     """
     with patch(
-        "reaper.core.discover_marshal_protected_pids",
+        "reaper.core.discover_session_protected_pids",
         return_value=set(),
     ):
         yield
@@ -219,12 +219,12 @@ class TestIsPidAlive:
             assert is_pid_alive(1) is True
 
 
-class TestDiscoverMarshalProtectedPids:
-    """Tests for discover_marshal_protected_pids."""
+class TestDiscoverSessionProtectedPids:
+    """Tests for discover_session_protected_pids."""
 
     def test_no_projects_root_returns_empty(self, tmp_path: Path) -> None:
         missing = tmp_path / "does-not-exist"
-        assert discover_marshal_protected_pids(missing) == set()
+        assert discover_session_protected_pids(missing) == set()
 
     def test_live_pid_marker_is_protected(self, tmp_path: Path) -> None:
         import os
@@ -239,7 +239,7 @@ class TestDiscoverMarshalProtectedPids:
             "started: '2026-07-15T00:00:00Z'\n",
         )
 
-        result = discover_marshal_protected_pids(tmp_path)
+        result = discover_session_protected_pids(tmp_path)
 
         assert result == {os.getpid()}
 
@@ -257,7 +257,7 @@ class TestDiscoverMarshalProtectedPids:
             f"task: my-task\npid: {proc.pid}\n",
         )
 
-        result = discover_marshal_protected_pids(tmp_path)
+        result = discover_session_protected_pids(tmp_path)
 
         assert result == set()
 
@@ -268,7 +268,7 @@ class TestDiscoverMarshalProtectedPids:
         marker_dir.mkdir(parents=True)
         (marker_dir / "broken.yaml").write_text("not a pid line at all\n")
 
-        assert discover_marshal_protected_pids(tmp_path) == set()
+        assert discover_session_protected_pids(tmp_path) == set()
 
 
 class TestProcessAncestorPids:
@@ -309,14 +309,14 @@ class TestProcessAncestorPids:
         assert chain == [999]
 
 
-class TestOrphanDetectionRespectsMarshal:
-    """Marshal-supervised processes must never be treated as orphan/stale,
+class TestOrphanDetectionRespectsScheduler:
+    """Scheduler-dispatched processes must never be treated as orphan/stale,
     even though they legitimately have no TTY."""
 
     def test_protected_ancestor_excludes_from_orphans(self) -> None:
         processes = [
             _create_process(pid=100, is_current=True),
-            _create_process(pid=200, is_orphan=True),  # marshal-supervised
+            _create_process(pid=200, is_orphan=True),  # scheduler-dispatched
             _create_process(pid=300, is_orphan=True),  # genuine orphan
         ]
 
