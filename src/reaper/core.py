@@ -9,6 +9,7 @@ from pathlib import Path
 from reaper.models import ProcessInfo
 
 CLAUDE_PROCESS_NAME = "claude"
+CLAUDE_APP_MARKERS = (".app/contents/", "claude.app")
 PROJECTS_ROOT = Path.home() / "work" / "projects"
 MAX_ANCESTOR_DEPTH = 32
 
@@ -41,10 +42,15 @@ def discover_claude_processes() -> list[ProcessInfo]:
     processes: list[ProcessInfo] = []
 
     for line in result.stdout.splitlines()[1:]:
-        if CLAUDE_PROCESS_NAME not in line.lower():
+        line_lower = line.lower()
+
+        if CLAUDE_PROCESS_NAME not in line_lower:
             continue
 
-        if "grep" in line.lower():
+        if "grep" in line_lower:
+            continue
+
+        if any(marker in line_lower for marker in CLAUDE_APP_MARKERS):
             continue
 
         process = _parse_ps_line(line=line, current_pid=current_pid)
@@ -84,7 +90,11 @@ def _parse_ps_line(
     cpu_time = parts[9]
     command = " ".join(parts[10:])
 
-    if CLAUDE_PROCESS_NAME not in command.lower():
+    command_lower = command.lower()
+    if CLAUDE_PROCESS_NAME not in command_lower:
+        return None
+
+    if any(marker in command_lower for marker in CLAUDE_APP_MARKERS):
         return None
 
     is_orphan = terminal == "??"

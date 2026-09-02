@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from reaper.core import (
+    _parse_ps_line,
     discover_session_protected_pids,
     identify_orphan_processes,
     identify_stale_processes,
@@ -307,6 +308,57 @@ class TestProcessAncestorPids:
         ):
             chain = process_ancestor_pids(999)
         assert chain == [999]
+
+
+class TestClaudeAppExclusion:
+    """Claude.app desktop must never be matched as a Claude Code process."""
+
+    def test_parse_ps_line_skips_claude_app(self) -> None:
+        line = (
+            "davi  12345  0.5  1.2 123456 65536 ??  S  10:00  0:05.00 "
+            "/Applications/Claude.app/Contents/MacOS/Claude"
+        )
+        assert _parse_ps_line(line=line, current_pid=1) is None
+
+    def test_parse_ps_line_skips_claude_app_helper(self) -> None:
+        line = (
+            "davi  12346  0.1  0.3 123456 32768 ??  S  10:00  0:01.00 "
+            "/Applications/Claude.app/Contents/Frameworks/"
+            "Claude Helper (Renderer).app/Contents/MacOS/"
+            "Claude Helper (Renderer)"
+        )
+        assert _parse_ps_line(line=line, current_pid=1) is None
+
+    def test_parse_ps_line_keeps_claude_cli(self) -> None:
+        line = (
+            "davi  54321  1.0  1.5 234567 131072 s001  S+  10:00  0:30.00 "
+            "claude --dangerously-skip-permissions --model opus"
+        )
+        result = _parse_ps_line(line=line, current_pid=1)
+        assert result is not None
+        assert result.pid == 54321
+
+    def test_discover_skips_claude_app_in_ps_output(self) -> None:
+        ps_output = (
+            "USER  PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND\n"
+            "davi  12345  0.5  1.2 123456 65536 ??  S  10:00  0:05.00 "
+            "/Applications/Claude.app/Contents/MacOS/Claude\n"
+            "davi  54321  1.0  1.5 234567 131072 s001  S+  10:00  0:30.00 "
+            "claude --dangerously-skip-permissions\n"
+        )
+        mock_result = MagicMock()
+        mock_result.stdout = ps_output
+
+        with (
+            patch("reaper.core.subprocess.run", return_value=mock_result),
+            patch("reaper.core.get_current_pid", return_value=1),
+        ):
+            from reaper.core import discover_claude_processes
+
+            processes = discover_claude_processes()
+
+        assert len(processes) == 1
+        assert processes[0].pid == 54321
 
 
 class TestOrphanDetectionRespectsScheduler:
