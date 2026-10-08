@@ -4,23 +4,69 @@ import os
 import re
 import signal
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from reaper.models import ProcessInfo
 
-CLAUDE_PROCESS_NAME = "claude"
+CLAUDE_EXECUTABLE = "claude"
+JS_RUNTIMES = ("node", "bun")
+CLAUDE_CODE_PACKAGE_MARKER = "claude-code/"
 CLAUDE_APP_MARKERS = (".app/contents/", "claude.app")
+SPARE_ENV_MARKER = "REAPER_SPARE=1"
 PROJECTS_ROOT = Path.home() / "work" / "projects"
 MAX_ANCESTOR_DEPTH = 32
+INIT_PID = 1
+IDLE_SAMPLE_SECONDS = 2.0
+IDLE_CPU_TOLERANCE_SECONDS = 0.05
 
 
-def get_current_pid() -> int:
-    """Get the PID of the current Claude Code process."""
-    return os.getppid()
+def get_current_pids() -> set[int]:
+    """PIDs that belong to the invocation running reaper right now.
+
+    reaper runs under a shell spawned by a Claude Code session (or by
+    cron), so the "current session" is not only the direct parent: it
+    is any `claude` among our ancestors. Every ancestor is excluded.
+    """
+    return set(process_ancestor_pids(os.getpid()))
+
+
+def is_claude_cli(args: str) -> bool:
+    """Whether a command line is the Claude Code CLI itself.
+
+    Matching is by executable only: argv[0] named `claude`, or a JS
+    runtime running the `@anthropic-ai/claude-code` package. A path
+    containing "claude" anywhere else in argv (the session's tmp dir,
+    `~/.claude/shell-snapshots`, a `--model claude-...` flag of an
+    unrelated tool) never makes a process a Claude Code process.
+
+    Args:
+        args: Full command line (argv joined by spaces).
+
+    Returns:
+        True only for the Claude Code CLI.
+    """
+    tokens = args.split()
+    if not tokens:
+        return False
+
+    executable = tokens[0].lower()
+    if any(marker in executable for marker in CLAUDE_APP_MARKERS):
+        return False
+
+    name = Path(executable).name
+    if name == CLAUDE_EXECUTABLE:
+        return True
+
+    if name in JS_RUNTIMES and len(tokens) > 1:
+        return CLAUDE_CODE_PACKAGE_MARKER in tokens[1].lower()
+
+    return False
 
 
 def discover_claude_processes() -> list[ProcessInfo]:
-    """Find all running Claude Code processes.
+    """Find all running Claude Code CLI processes.
 
     Returns:
         List of ProcessInfo objects for each Claude process found.
@@ -30,7 +76,12 @@ def discover_claude_processes() -> list[ProcessInfo]:
     """
     try:
         result = subprocess.run(
-            ["ps", "aux"],
+            [
+                "ps",
+                "-axww",
+                "-o",
+                "pid=,ppid=,rss=,tty=,start=,time=,args=",
+            ],
             capture_output=True,
             text=True,
             check=True,
@@ -38,67 +89,53 @@ def discover_claude_processes() -> list[ProcessInfo]:
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to list processes: {e}") from e
 
-    current_pid = get_current_pid()
+    current_pids = get_current_pids()
     processes: list[ProcessInfo] = []
 
-    for line in result.stdout.splitlines()[1:]:
-        line_lower = line.lower()
-
-        if CLAUDE_PROCESS_NAME not in line_lower:
-            continue
-
-        if "grep" in line_lower:
-            continue
-
-        if any(marker in line_lower for marker in CLAUDE_APP_MARKERS):
-            continue
-
-        process = _parse_ps_line(line=line, current_pid=current_pid)
+    for line in result.stdout.splitlines():
+        process = _parse_ps_row(line=line, current_pids=current_pids)
         if process:
             processes.append(process)
 
     return sorted(processes, key=lambda p: p.pid)
 
 
-def _parse_ps_line(
+def _parse_ps_row(
     line: str,
-    current_pid: int,
+    current_pids: set[int],
 ) -> ProcessInfo | None:
-    """Parse a line from ps aux output.
+    """Parse one row of `ps -o pid=,ppid=,rss=,tty=,start=,time=,args=`.
 
-    ps aux columns: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND
+    A process is an orphan only when both hold: no controlling
+    terminal, and its parent is gone (re-parented to init/launchd).
+    A `claude -p` run by a live script has no TTY either, but its
+    parent still owns it.
 
     Args:
-        line: Single line from ps aux output.
-        current_pid: PID of the current process.
+        line: Single row of ps output.
+        current_pids: PIDs of the invocation running reaper.
 
     Returns:
-        ProcessInfo if line represents a Claude process, None otherwise.
+        ProcessInfo if the row is the Claude Code CLI, None otherwise.
     """
-    parts = line.split()
-    if len(parts) < 11:
+    parts = line.split(maxsplit=6)
+    if len(parts) < 7:
         return None
 
     try:
-        pid = int(parts[1])
-        memory_kb = int(parts[5])  # RSS column (resident set size)
+        pid = int(parts[0])
+        ppid = int(parts[1])
+        memory_kb = int(parts[2])
     except ValueError:
         return None
 
-    terminal = parts[6]
-    start_time = parts[8]
-    cpu_time = parts[9]
-    command = " ".join(parts[10:])
+    terminal = _short_terminal(parts[3])
+    start_time = parts[4]
+    cpu_time = parts[5]
+    command = parts[6]
 
-    command_lower = command.lower()
-    if CLAUDE_PROCESS_NAME not in command_lower:
+    if not is_claude_cli(command):
         return None
-
-    if any(marker in command_lower for marker in CLAUDE_APP_MARKERS):
-        return None
-
-    is_orphan = terminal == "??"
-    is_current = pid == current_pid
 
     return ProcessInfo(
         pid=pid,
@@ -107,9 +144,17 @@ def _parse_ps_line(
         start_time=start_time,
         cpu_time=cpu_time,
         memory_kb=memory_kb,
-        is_orphan=is_orphan,
-        is_current=is_current,
+        is_orphan=terminal == "??" and ppid == INIT_PID,
+        is_current=pid in current_pids,
+        ppid=ppid,
     )
+
+
+def _short_terminal(tty: str) -> str:
+    """Render `ttys001` as `s001`, like `ps aux` does."""
+    if tty.startswith("tty"):
+        return tty[3:]
+    return tty
 
 
 def is_pid_alive(pid: int) -> bool:
@@ -223,11 +268,50 @@ def process_ancestor_pids(
     return chain
 
 
+def has_spare_marker(pid: int) -> bool:
+    """Whether a process opted out of reaping with `REAPER_SPARE=1`.
+
+    Reads the process environment through `ps -E`, which macOS allows
+    for processes of the same user. Launch a session or job with
+    `REAPER_SPARE=1 claude ...` to keep reaper away from it.
+
+    Args:
+        pid: Process ID to inspect.
+
+    Returns:
+        True if `REAPER_SPARE=1` is in the process environment.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-E", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        return False
+    return SPARE_ENV_MARKER in result.stdout.split()
+
+
+def _without_spared(
+    processes: list[ProcessInfo],
+    protected_pids: set[int],
+) -> list[ProcessInfo]:
+    """Drop opted-out processes and anything a live session supervises."""
+    kept = [p for p in processes if not has_spare_marker(p.pid)]
+    if not protected_pids:
+        return kept
+    return [
+        p for p in kept
+        if not protected_pids.intersection(process_ancestor_pids(p.pid))
+    ]
+
+
 def identify_orphan_processes(
     processes: list[ProcessInfo],
     protected_pids: set[int] | None = None,
 ) -> list[ProcessInfo]:
-    """Filter processes to find orphans (no terminal attached).
+    """Filter processes to find orphans.
 
     Args:
         processes: List of all Claude processes.
@@ -238,8 +322,8 @@ def identify_orphan_processes(
             empty set to disable protection entirely.
 
     Returns:
-        List of orphan processes (excluding current session and
-        anything the scheduler supervises).
+        List of orphan processes (excluding current session, opted-out
+        processes and anything the scheduler supervises).
     """
     if protected_pids is None:
         protected_pids = discover_session_protected_pids()
@@ -248,15 +332,7 @@ def identify_orphan_processes(
         p for p in processes
         if p.is_orphan and not p.is_current
     ]
-    if not protected_pids:
-        return candidates
-
-    return [
-        p for p in candidates
-        if not protected_pids.intersection(
-            process_ancestor_pids(p.pid),
-        )
-    ]
+    return _without_spared(candidates, protected_pids)
 
 
 def identify_stale_processes(
@@ -284,14 +360,68 @@ def identify_stale_processes(
 
     if protected_pids is None:
         protected_pids = discover_session_protected_pids()
-    if not protected_pids:
-        return candidates
+    return _without_spared(candidates, protected_pids)
 
-    return [
-        p for p in candidates
-        if not protected_pids.intersection(
-            process_ancestor_pids(p.pid),
+
+def read_cpu_seconds(pids: list[int]) -> dict[int, float]:
+    """Accumulated CPU seconds per PID, from `ps -o time=`."""
+    if not pids:
+        return {}
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,time=", "-p", ",".join(map(str, pids))],
+            capture_output=True,
+            text=True,
+            check=False,
         )
+    except OSError:
+        return {}
+
+    seconds: dict[int, float] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            seconds[int(parts[0])] = parse_cpu_time(parts[1])
+        except ValueError:
+            continue
+    return seconds
+
+
+def parse_cpu_time(text: str) -> float:
+    """Parse ps cumulative time (`[[dd-]hh:]mm:ss.cc`) into seconds."""
+    days = 0
+    if "-" in text:
+        day_text, text = text.split("-", 1)
+        days = int(day_text)
+    total = 0.0
+    for part in text.split(":"):
+        total = total * 60 + float(part)
+    return days * 86400 + total
+
+
+def identify_idle_processes(
+    processes: list[ProcessInfo],
+    window_seconds: float = IDLE_SAMPLE_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> list[ProcessInfo]:
+    """Keep only processes that burned no CPU over a sampling window.
+
+    An orphan that is still working (a `claude -p` whose launcher
+    exited, still streaming) is not stale yet.
+    """
+    if not processes:
+        return []
+    pids = [p.pid for p in processes]
+    before = read_cpu_seconds(pids)
+    sleep(window_seconds)
+    after = read_cpu_seconds(pids)
+    return [
+        p for p in processes
+        if p.pid in before
+        and p.pid in after
+        and after[p.pid] - before[p.pid] <= IDLE_CPU_TOLERANCE_SECONDS
     ]
 
 

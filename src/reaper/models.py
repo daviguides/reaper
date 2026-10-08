@@ -15,6 +15,7 @@ class ProcessInfo:
     memory_kb: int
     is_orphan: bool
     is_current: bool
+    ppid: int = 0
 
     @property
     def age_display(self) -> str:

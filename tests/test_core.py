@@ -6,11 +6,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from reaper.core import (
-    _parse_ps_line,
+    _parse_ps_row,
     discover_session_protected_pids,
+    has_spare_marker,
+    identify_idle_processes,
     identify_orphan_processes,
     identify_stale_processes,
+    is_claude_cli,
     is_pid_alive,
+    parse_cpu_time,
     process_ancestor_pids,
 )
 from reaper.models import (
@@ -31,9 +35,12 @@ def _no_real_protected_pids():
     Tests exercising the session-awareness pass `protected_pids`
     explicitly, overriding this.
     """
-    with patch(
-        "reaper.core.discover_session_protected_pids",
-        return_value=set(),
+    with (
+        patch(
+            "reaper.core.discover_session_protected_pids",
+            return_value=set(),
+        ),
+        patch("reaper.core.has_spare_marker", return_value=False),
     ):
         yield
 
@@ -313,37 +320,37 @@ class TestProcessAncestorPids:
 class TestClaudeAppExclusion:
     """Claude.app desktop must never be matched as a Claude Code process."""
 
-    def test_parse_ps_line_skips_claude_app(self) -> None:
+    def test_parse_ps_row_skips_claude_app(self) -> None:
         line = (
-            "davi  12345  0.5  1.2 123456 65536 ??  S  10:00  0:05.00 "
+            "12345 1 65536 ?? 10:00 0:05.00 "
             "/Applications/Claude.app/Contents/MacOS/Claude"
         )
-        assert _parse_ps_line(line=line, current_pid=1) is None
+        assert _parse_ps_row(line=line, current_pids={1}) is None
 
-    def test_parse_ps_line_skips_claude_app_helper(self) -> None:
+    def test_parse_ps_row_skips_claude_app_helper(self) -> None:
         line = (
-            "davi  12346  0.1  0.3 123456 32768 ??  S  10:00  0:01.00 "
+            "12346 1 32768 ?? 10:00 0:01.00 "
             "/Applications/Claude.app/Contents/Frameworks/"
             "Claude Helper (Renderer).app/Contents/MacOS/"
             "Claude Helper (Renderer)"
         )
-        assert _parse_ps_line(line=line, current_pid=1) is None
+        assert _parse_ps_row(line=line, current_pids={1}) is None
 
-    def test_parse_ps_line_keeps_claude_cli(self) -> None:
+    def test_parse_ps_row_keeps_claude_cli(self) -> None:
         line = (
-            "davi  54321  1.0  1.5 234567 131072 s001  S+  10:00  0:30.00 "
+            "54321 900 131072 ttys001 10:00 0:30.00 "
             "claude --dangerously-skip-permissions --model opus"
         )
-        result = _parse_ps_line(line=line, current_pid=1)
+        result = _parse_ps_row(line=line, current_pids={1})
         assert result is not None
         assert result.pid == 54321
+        assert result.terminal == "s001"
 
     def test_discover_skips_claude_app_in_ps_output(self) -> None:
         ps_output = (
-            "USER  PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND\n"
-            "davi  12345  0.5  1.2 123456 65536 ??  S  10:00  0:05.00 "
+            "12345 1 65536 ?? 10:00 0:05.00 "
             "/Applications/Claude.app/Contents/MacOS/Claude\n"
-            "davi  54321  1.0  1.5 234567 131072 s001  S+  10:00  0:30.00 "
+            "54321 900 131072 ttys001 10:00 0:30.00 "
             "claude --dangerously-skip-permissions\n"
         )
         mock_result = MagicMock()
@@ -351,7 +358,7 @@ class TestClaudeAppExclusion:
 
         with (
             patch("reaper.core.subprocess.run", return_value=mock_result),
-            patch("reaper.core.get_current_pid", return_value=1),
+            patch("reaper.core.get_current_pids", return_value={1}),
         ):
             from reaper.core import discover_claude_processes
 
@@ -359,6 +366,174 @@ class TestClaudeAppExclusion:
 
         assert len(processes) == 1
         assert processes[0].pid == 54321
+
+
+class TestClaudeCliMatching:
+    """Only the Claude Code CLI is a Claude Code process: matched by
+    executable, never by a "claude" substring elsewhere in argv."""
+
+    def test_detached_python_job_under_claude_tmp_is_not_matched(self) -> None:
+        # The eval runs that reaper killed every 15 min (exit 144).
+        line = (
+            "55599 1 900000 ?? 10:46 3:00.00 "
+            "/repo/.venv/bin/python -m trybe_assistant.eval run "
+            "--out /private/tmp/claude-502/proj/session/scratchpad/bl/x.json"
+        )
+        assert _parse_ps_row(line=line, current_pids={2}) is None
+
+    def test_bash_tool_shell_of_live_session_is_not_matched(self) -> None:
+        line = (
+            "56045 15060 2000 ?? 10:46 0:00.03 "
+            "/bin/zsh -c source /Users/davi/.claude/shell-snapshots/"
+            "snapshot-zsh-1.sh && pytest"
+        )
+        assert _parse_ps_row(line=line, current_pids={2}) is None
+
+    def test_other_tool_with_claude_model_flag_is_not_matched(self) -> None:
+        assert not is_claude_cli(
+            "/opt/homebrew/bin/llm --model claude-opus-5-5 prompt"
+        )
+
+    def test_claude_by_absolute_path_is_matched(self) -> None:
+        assert is_claude_cli("/Users/davi/.local/bin/claude -p hi")
+
+    def test_node_hosted_claude_code_is_matched(self) -> None:
+        assert is_claude_cli(
+            "node /usr/local/lib/node_modules/@anthropic-ai/"
+            "claude-code/cli.js --resume abc"
+        )
+
+    def test_node_running_other_script_is_not_matched(self) -> None:
+        assert not is_claude_cli("node /tmp/claude-502/server.js")
+
+
+class TestOrphanRequiresDeadParent:
+    """No TTY alone is not orphanhood: the parent must be gone."""
+
+    def test_stale_orphan_claude_is_reaped(self) -> None:
+        line = "700 1 300000 ?? 09:00 0:10.00 claude --resume abc"
+        process = _parse_ps_row(line=line, current_pids={2})
+        assert process is not None and process.is_orphan
+        result = identify_orphan_processes(
+            processes=[process], protected_pids=set(),
+        )
+        assert [p.pid for p in result] == [700]
+
+    def test_claude_p_under_live_script_is_spared(self) -> None:
+        # `claude -p` run by a live script: no TTY, parent alive.
+        line = "701 650 200000 ?? 09:00 0:10.00 claude -p summarize"
+        process = _parse_ps_row(line=line, current_pids={2})
+        assert process is not None and not process.is_orphan
+        assert identify_orphan_processes(
+            processes=[process], protected_pids=set(),
+        ) == []
+
+    def test_active_claude_with_terminal_is_spared(self) -> None:
+        line = "702 600 400000 ttys004 09:00 9:10.00 claude --resume x"
+        process = _parse_ps_row(line=line, current_pids={2})
+        assert process is not None and not process.is_orphan
+        assert identify_orphan_processes(
+            processes=[process], protected_pids=set(),
+        ) == []
+
+    def test_ancestor_session_is_current(self) -> None:
+        line = "703 1 400000 ?? 09:00 1:00.00 claude --resume x"
+        process = _parse_ps_row(line=line, current_pids={9, 703})
+        assert process is not None and process.is_current
+        assert identify_orphan_processes(
+            processes=[process], protected_pids=set(),
+        ) == []
+
+
+class TestSpareOptOut:
+    """`REAPER_SPARE=1` in the process environment is always honoured."""
+
+    def test_opted_out_orphan_is_spared(self) -> None:
+        processes = [
+            _create_process(pid=200, is_orphan=True),
+            _create_process(pid=300, is_orphan=True),
+        ]
+        with patch(
+            "reaper.core.has_spare_marker",
+            side_effect=lambda pid: pid == 200,
+        ):
+            result = identify_orphan_processes(
+                processes=processes, protected_pids=set(),
+            )
+        assert [p.pid for p in result] == [300]
+
+    def test_opt_out_also_holds_for_all_mode(self) -> None:
+        processes = [
+            _create_process(pid=200, is_orphan=False),
+            _create_process(pid=300, is_orphan=False),
+        ]
+        with patch(
+            "reaper.core.has_spare_marker",
+            side_effect=lambda pid: pid == 300,
+        ):
+            result = identify_stale_processes(
+                processes=processes, protected_pids=set(),
+            )
+        assert [p.pid for p in result] == [200]
+
+    def test_has_spare_marker_reads_process_environment(self) -> None:
+        result = MagicMock()
+        result.stdout = "claude --resume x PATH=/bin REAPER_SPARE=1 HOME=/u"
+        with patch("reaper.core.subprocess.run", return_value=result):
+            assert has_spare_marker(123)
+        result.stdout = "claude --resume x PATH=/bin HOME=/u"
+        with patch("reaper.core.subprocess.run", return_value=result):
+            assert not has_spare_marker(123)
+
+
+class TestAllModeSemantics:
+    """`--all` still means every non-current Claude CLI process."""
+
+    def test_all_mode_includes_attached_and_orphan(self) -> None:
+        processes = [
+            _create_process(pid=100, is_current=True),
+            _create_process(pid=200, is_orphan=True),
+            _create_process(pid=300, is_orphan=False),
+        ]
+        result = identify_stale_processes(
+            processes=processes, protected_pids=set(),
+        )
+        assert [p.pid for p in result] == [200, 300]
+
+
+class TestIdleSampling:
+    """An orphan still burning CPU is not stale yet."""
+
+    def test_busy_orphan_is_spared_idle_one_is_kept(self) -> None:
+        processes = [
+            _create_process(pid=200, is_orphan=True),
+            _create_process(pid=300, is_orphan=True),
+        ]
+        samples = iter([{200: 10.0, 300: 5.0}, {200: 12.5, 300: 5.0}])
+        with patch(
+            "reaper.core.read_cpu_seconds",
+            side_effect=lambda pids: next(samples),
+        ):
+            result = identify_idle_processes(
+                processes=processes, sleep=lambda s: None,
+            )
+        assert [p.pid for p in result] == [300]
+
+    def test_process_gone_during_sampling_is_dropped(self) -> None:
+        processes = [_create_process(pid=200, is_orphan=True)]
+        samples = iter([{200: 1.0}, {}])
+        with patch(
+            "reaper.core.read_cpu_seconds",
+            side_effect=lambda pids: next(samples),
+        ):
+            assert identify_idle_processes(
+                processes=processes, sleep=lambda s: None,
+            ) == []
+
+    def test_parse_cpu_time_formats(self) -> None:
+        assert parse_cpu_time("0:05.50") == 5.5
+        assert parse_cpu_time("1:02:03.00") == 3723.0
+        assert parse_cpu_time("2-01:00:00.00") == 2 * 86400 + 3600.0
 
 
 class TestOrphanDetectionRespectsScheduler:

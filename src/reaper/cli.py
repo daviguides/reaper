@@ -7,6 +7,7 @@ from rich.table import Table
 from reaper import __version__
 from reaper.core import (
     discover_claude_processes,
+    identify_idle_processes,
     identify_orphan_processes,
     identify_stale_processes,
     terminate_processes,
@@ -102,7 +103,7 @@ def hunt(
         False,
         "--all",
         "-a",
-        help="Kill all non-current processes, not just orphans",
+        help="Kill all non-current Claude CLI processes, not just idle orphans",
     ),
     yes: bool = typer.Option(
         False,
@@ -122,7 +123,9 @@ def hunt(
         targets = identify_stale_processes(processes=processes)
         target_type = "stale"
     else:
-        targets = identify_orphan_processes(processes=processes)
+        targets = identify_idle_processes(
+            processes=identify_orphan_processes(processes=processes),
+        )
         target_type = "orphan"
 
     if not targets:
