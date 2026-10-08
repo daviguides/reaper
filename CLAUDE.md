@@ -57,9 +57,28 @@ Found 1 orphan process(es) consuming 1.3 MB
 
 | Status | Description |
 |--------|-------------|
-| `current` | Your active Claude session |
-| `active` | Attached to a terminal |
-| `orphan` | No terminal attached (stale) |
+| `current` | The Claude session running reaper (any ancestor of the invocation) |
+| `active` | Attached to a terminal, or its parent is still alive |
+| `orphan` | No terminal AND parent gone (PPID 1) |
+
+## What Counts as a Claude Code Process
+
+Only the Claude Code CLI: argv[0] named `claude`, or `node`/`bun` running the
+`@anthropic-ai/claude-code` package. Claude.app is excluded. A "claude" substring
+elsewhere in argv (the session tmp dir `/private/tmp/claude-<uid>/...`,
+`~/.claude/shell-snapshots`, a `--model claude-...` flag) never matches, so jobs
+launched from a session (evals, builds, servers, tool shells) are never reaped.
+
+`hunt` kills an orphan only if it is also idle (no CPU progress over a 2s sample).
+
+## Opting Out
+
+Start a process with `REAPER_SPARE=1` in its environment to keep reaper away from
+it in every mode, `--all` included (read via `ps -E`, same user only):
+
+```bash
+REAPER_SPARE=1 claude -p "long job"
+```
 
 ## Tech Stack
 
